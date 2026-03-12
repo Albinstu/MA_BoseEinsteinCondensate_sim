@@ -26,17 +26,6 @@ import matplotlib.pyplot as plt
 # GLOBAL VARIABLES
 # =============================================================================
 
-# print(PETSc.ScalarType)
-assert np.dtype(PETSc.ScalarType).kind == "c"
-
-# CHECK IF ALGEBRA PETSc CAN HANDLE COMPLEX
-if np.issubdtype(PETSc.ScalarType, np.complexfloating):
-    # imaginaryUnit = PETSc.ScalarType(0 + 1j)
-    j_im = PETSc.ScalarType(0 + 1j)
-else:
-    print('Complex Treatment is needed')
-    exit() # not correct way to handle
-
 ## DOMAIN PARAMETERS
 box_width_comp_domain = 12 # of computational domain
 box_height_comp_domain = 12 # -- || --
@@ -88,12 +77,13 @@ initial_coord = np.array([- start_circ_r * np.cos(ang_of_atac),
 
 # momentum vector of initial cond
 # p_vec = - 20 * initial_coord[:] / np.linalg.norm(initial_coord)
-p_vec = + 6 * (initial_coord[:] / np.linalg.norm(initial_coord))
+p_vec = - 6 * (initial_coord[:] / np.linalg.norm(initial_coord))
 # p_vec = [1, 0] # velocity of initial cond
 
 gauss_width = 1 # arbitrarily chosen # smaller diffuses faster
 state_pop1 = 1 / np.sqrt(2) # state population
 state_pop2 = - state_pop1
+
 
 
 
@@ -193,15 +183,19 @@ def polygon_mesh(vertices, h):
     return meshdata.mesh, meshdata.cell_tags, meshdata.facet_tags
 
 
-def plotter_func(domain_mesh, sim_solutions, sim_time_iter_var):
+def plotter_func(domain_mesh, sim_solutions,
+                 sim_time_iter_var, scale_factor=10, args=None):
+    
     # UNPACK variables
-    T = sim_time_iter_var[0]
+    # T = sim_time_iter_var[0]
     N_iter = sim_time_iter_var[1]
-    dt = sim_time_iter_var[2]
-    dt_inv = sim_time_iter_var[3]
+    # dt = sim_time_iter_var[2]
+    # dt_inv = sim_time_iter_var[3]
+    
+    
     
     # if not same length then something wrong
-    assert (N_iter + 1) == (sim_solutions.shape[0] // 2)
+    assert (N_iter + 1) == (sim_solutions.shape[0] // 2) #debug
     
     
     V = fem.functionspace(domain_mesh, ("Lagrange", 1))
@@ -245,9 +239,56 @@ def plotter_func(domain_mesh, sim_solutions, sim_time_iter_var):
         cmap=viridis,
         scalar_bar_args=sargs,
         clim=[0, 
-              max(np.abs(psi1_t)**2 + np.abs(psi2_t)**2)
+              scale_factor * max(np.abs(psi1_t)**2 + np.abs(psi2_t)**2)
               ],
     )
+    
+    
+    # SHADY BUT MAY WORK
+    # POT. FIX, DRAW MANUAL RECTANGLES
+    # SAVE DOMAIN DATA IN np FILE WHICH IS READ BEFORE PLOTTING
+    if args != None :
+        x0, x1 = potential_coords[0]
+        y0, y1 = potential_coords[1]
+        
+        
+        pot_edges = [
+            pyvista.Line((x0,y0,0),(x1,y0,0)),
+            pyvista.Line((x1,y0,0),(x1,y1,0)),
+            pyvista.Line((x1,y1,0),(x0,y1,0)),
+            pyvista.Line((x0,y1,0),(x0,y0,0))
+            ]
+        
+        
+        xmin, xmax = ext_domain_coord_ranges[0]
+        ymin, ymax = ext_domain_coord_ranges[1]
+        
+        xmin += delta
+        xmax += - delta
+        ymin += delta
+        ymax += - delta
+        
+        CAP_edges = [
+            pyvista.Line((xmin,ymin,0),(xmax,ymin,0)),
+            pyvista.Line((xmax,ymin,0),(xmax,ymax,0)),
+            pyvista.Line((xmax,ymax,0),(xmin,ymax,0)),
+            pyvista.Line((xmin,ymax,0),(xmin,ymin,0))
+        ]
+        
+        
+        for i in range(4):
+            plotter.add_mesh(CAP_edges[i], 
+                             color="white", 
+                             line_width=2,
+                             opacity=0.7
+                             )
+            
+            plotter.add_mesh(pot_edges[i], 
+                             color="red", 
+                             line_width=2,
+                             opacity=0.7
+                             )
+    
     
     plotter.view_xy()
     plotter.camera.zoom(1.38)
@@ -258,14 +299,11 @@ def plotter_func(domain_mesh, sim_solutions, sim_time_iter_var):
         
         prob = np.abs(psi1_t)**2 + np.abs(psi2_t)**2
         
-        grid.point_data["Psi"][:] = prob
+        grid.point_data["Psi"][:] = scale_factor * prob
         
         plotter.write_frame()
-        # if not it % (N//100) :
-        #     break
     
     plotter.close()
-    # pyvista.close_all()
     
     return None
 
@@ -289,7 +327,7 @@ def CAP_func(x): # Complex absorbing potential
     abs_x = np.abs(x[0]) # - a to optimise
     abs_y = np.abs(x[1]) # - b to optimise
     n = 4
-    CAP_strength = 5
+    CAP_strength = 50
     index_func_x = (abs_x > a) # gep ?
     index_func_y = (abs_y > b) # geq ?
     inv_delta = 1 / delta
@@ -340,6 +378,15 @@ def L2_norm_printer(f1, f2):
 
 
 def problem_solver(domain_mesh, time_iter_var : list,):
+    
+    assert np.dtype(PETSc.ScalarType).kind == "c"
+
+    # CHECK IF ALGEBRA PETSc CAN HANDLE COMPLEX
+    if np.issubdtype(PETSc.ScalarType, np.complexfloating):
+        j_im = PETSc.ScalarType(0 + 1j)
+    else:
+        print('Complex Treatment is needed')
+    
     
     # UNPACK variables for time stepper
     # T = time_iter_var[0]
@@ -422,11 +469,12 @@ def problem_solver(domain_mesh, time_iter_var : list,):
     L2 += - j_im * u * ufl.dot(b2_vec, ufl.grad(phi2_new + psi1_old)) * v_conj * ufl.dx
     
     
-    prob1 = LinearProblem(
-        a,
-        L1,
-        bcs=[bcs],
-        u=psi1_new,
+    prob = LinearProblem(
+        [[a, None], 
+         [None, a]],
+        [L1, L2],
+        bcs=[bcs, bcs],
+        u=[psi1_new, psi2_new],
         # petsc_options={"ksp_type": "preonly", "pc_type": "lu"}, 
         petsc_options = { # best for medium 
         "ksp_type": "gmres",
@@ -439,27 +487,6 @@ def problem_solver(domain_mesh, time_iter_var : list,):
         # },
         petsc_options_prefix="psi1_solver_",
         )
-    
-    
-    prob2 = LinearProblem(
-        a,
-        L2,
-        bcs=[bcs],
-        u=psi2_new,
-        # petsc_options={"ksp_type": "preonly", "pc_type": "lu"}, 
-        petsc_options = { # best for medium 
-        "ksp_type": "gmres",
-        "pc_type": "ilu"
-                    },
-        # petsc_options = { # best for large parallel by chatgpt "FEniCSx complex conjugate..."
-        # "ksp_type": "gmres",
-        # "pc_type": "hypre",
-        # "pc_hypre_type": "boomeramg"
-        # },
-        petsc_options_prefix="psi2_solver_",
-        )
-    
-    
     
     
     complete_sim_solutions = np.zeros(
@@ -478,8 +505,8 @@ def problem_solver(domain_mesh, time_iter_var : list,):
     for it in range(1, N_iter+1):
         
         # solve problem
-        prob1.solve()
-        prob2.solve()
+        prob.solve()
+        # prob2.solve()
         
         # update solutions
         # psi1_new.x.array[:] = psi1_new.x.array[:] - psi1_old.x.array[:]
@@ -496,11 +523,9 @@ def problem_solver(domain_mesh, time_iter_var : list,):
             )
         
         # force update the rhs
-        # prob1.A.zeroEntries()
-        prob1.A.assemble()
-        
-        # prob2.A.zeroEntries()
-        prob2.A.assemble()
+        # prob.A.zeroEntries()
+        fem.petsc.assemble_matrix(prob.A, prob.a, bcs=[bcs, bcs])
+        prob.A.assemble()
         
         
         phi1_new.x.array[:] = 2 * psi2_old.x.array[:] - phi1_new.x.array[:]
@@ -510,19 +535,10 @@ def problem_solver(domain_mesh, time_iter_var : list,):
         # store solution
         complete_sim_solutions[it] = psi1_old.x.array[:]
         complete_sim_solutions[(N_iter+1)+it] = psi2_old.x.array[:]
-        
-        # if it % (N // 10):
-        #     break
 
     
     # L2 norm
     L2_norm_printer(psi1_old, psi2_old)
-    
-    # # comm = psi1_new.function_space.mesh.comm
-    # PSI_norm = fem.form((psi1_new * ufl.conj(psi1_new) \
-    #                      + psi2_new * ufl.conj(psi2_new))* ufl.dx)
-    # PSI_norm_glob = np.sqrt(comm.allreduce(fem.assemble_scalar(PSI_norm), MPI.SUM))
-    # print(PSI_norm_glob)
     
     return complete_sim_solutions
 
@@ -542,7 +558,8 @@ ext_domain_mesh, _, _ = polygon_mesh(ext_domain_polygon_vertices, h)
 sim_solutions = problem_solver(ext_domain_mesh, sim_time_iter_var)
 
 
-plotter_func(ext_domain_mesh, sim_solutions, sim_time_iter_var)
+plotter_func(ext_domain_mesh, sim_solutions, sim_time_iter_var, 
+             scale_factor=10, args=True)
 
 
 
