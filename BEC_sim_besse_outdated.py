@@ -27,13 +27,13 @@ import matplotlib.pyplot as plt
 # =============================================================================
 
 ## DOMAIN PARAMETERS
-box_width_comp_domain = 12 # of computational domain
-box_height_comp_domain = 12 # -- || --
+box_width_comp_domain = 13 # of computational domain
+box_height_comp_domain = 13 # -- || --
 
 # rectangular domain is centered at origo
 a = box_width_comp_domain * 0.5 # half axis of box width
 b = box_height_comp_domain * 0.5 # half axis of box height
-delta = 2 # change to larger maybe 1 or 2
+delta = 1 # change to larger maybe 1 or 2
 
 # potential coordinates; row 0 - potential x-coord bounds
 #                        row 1 - potential y-coord bounds
@@ -77,7 +77,7 @@ initial_coord = np.array([- start_circ_r * np.cos(ang_of_atac),
 
 # momentum vector of initial cond
 # p_vec = - 20 * initial_coord[:] / np.linalg.norm(initial_coord)
-p_vec = - 6 * (initial_coord[:] / np.linalg.norm(initial_coord))
+p_vec = - 2 * (initial_coord[:] / np.linalg.norm(initial_coord))
 # p_vec = [1, 0] # velocity of initial cond
 
 gauss_width = 1 # arbitrarily chosen # smaller diffuses faster
@@ -356,10 +356,13 @@ def potential_func(x): # potential function
 
 def F_nonlin_func(psi1_arr, psi2_arr):
     # MODIFY THIS FUNC IF g1,g2,g3 CHANGE VALUES
-    p1 = np.conj(psi1_arr) * g * ( psi1_arr + psi2_arr ) 
-    p2 = np.conj(psi2_arr) * g * ( psi1_arr + psi2_arr )
+    # p1 = np.conj(psi1_arr) * g * ( psi1_arr + psi2_arr ) 
+    # p2 = np.conj(psi2_arr) * g * ( psi1_arr + psi2_arr )
+    # return p1 + p2
     
-    return p1 + p2
+    tmp = psi1_arr + psi2_arr
+    
+    return 2 * g * np.conj(tmp) * tmp
 
 
 def L2_norm_printer(f1, f2):
@@ -506,21 +509,23 @@ def problem_solver(domain_mesh, time_iter_var : list,):
         
         # solve problem
         prob.solve()
-        # prob2.solve()
         
         # update solutions
-        # psi1_new.x.array[:] = psi1_new.x.array[:] - psi1_old.x.array[:]
-        psi1_old.x.array[:] = psi1_new.x.array[:] - psi1_old.x.array[:]
-        
-        # psi2_new.x.array[:] = psi2_new.x.array[:] - psi2_old.x.array[:]
-        psi2_old.x.array[:] = psi2_new.x.array[:] - psi2_old.x.array[:]
+        psi1_old.x.array[:] = psi1_new.x.array - psi1_old.x.array
+        psi2_old.x.array[:] = psi2_new.x.array - psi2_old.x.array
         
         
-        gamma_new.x.array[:] = - gamma_new.x.array[:]
-        gamma_new.x.array[:] += 2*F_nonlin_func(
-            psi1_old.x.array[:], 
-            psi2_old.x.array[:]
-            )
+        gamma_new.x.array[:] = - gamma_new.x.array \
+            + 2*F_nonlin_func(
+                psi1_old.x.array, 
+                psi2_old.x.array
+                )
+            
+        # update ghost values
+        # psi1_old.x.scatter_forward()
+        # psi2_old.x.scatter_forward()
+        # gamma_new.x.scatter_forward()
+        
         
         # force update the rhs
         # prob.A.zeroEntries()
@@ -528,13 +533,17 @@ def problem_solver(domain_mesh, time_iter_var : list,):
         prob.A.assemble()
         
         
-        phi1_new.x.array[:] = 2 * psi2_old.x.array[:] - phi1_new.x.array[:]
-        phi2_new.x.array[:] = 2 * psi1_old.x.array[:] - phi2_new.x.array[:]
+        phi1_new.x.array[:] = 2 * psi2_old.x.array - phi1_new.x.array
+        phi2_new.x.array[:] = 2 * psi1_old.x.array - phi2_new.x.array
+        
+        # update ghost values
+        # phi1_new.x.scatter_forward()
+        # phi2_new.x.scatter_forward()
         
         
         # store solution
-        complete_sim_solutions[it] = psi1_old.x.array[:]
-        complete_sim_solutions[(N_iter+1)+it] = psi2_old.x.array[:]
+        complete_sim_solutions[it] = psi1_old.x.array
+        complete_sim_solutions[(N_iter+1)+it] = psi2_old.x.array
 
     
     # L2 norm
@@ -548,7 +557,7 @@ T = 1 # end time
 N = 300 # number of time steps from 0th
 dt = T / N # time step
 dt_inv = N / T
-sim_time_iter_var = [T, N // 2, dt, dt_inv] 
+sim_time_iter_var = [T, N, dt, dt_inv] 
 
 h = 0.09 # max mesh size
 ext_domain_mesh, _, _ = polygon_mesh(ext_domain_polygon_vertices, h)
