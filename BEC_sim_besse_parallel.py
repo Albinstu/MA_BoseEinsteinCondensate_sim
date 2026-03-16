@@ -26,8 +26,8 @@ import matplotlib.pyplot as plt
 # =============================================================================
 
 ## DOMAIN PARAMETERS
-box_width_comp_domain = 12 # of computational domain
-box_height_comp_domain = 12 # -- || --
+box_width_comp_domain = 13 # of computational domain
+box_height_comp_domain = 13 # -- || --
 
 # rectangular domain is centered at origo
 a = box_width_comp_domain * 0.5 # half axis of box width
@@ -76,7 +76,7 @@ initial_coord = np.array([- start_circ_r * np.cos(ang_of_atac),
 
 # momentum vector of initial cond
 # p_vec = - 20 * initial_coord[:] / np.linalg.norm(initial_coord)
-p_vec = - 2 * (initial_coord[:] / np.linalg.norm(initial_coord))
+p_vec = - 4 * (initial_coord[:] / np.linalg.norm(initial_coord))
 # p_vec = [1, 0] # velocity of initial cond
 
 gauss_width = 1 # arbitrarily chosen # smaller diffuses faster
@@ -443,8 +443,9 @@ def problem_solver(domain_mesh, time_iter_var : list,):
     v_conj = ufl.conj(v) # conjugate needed instead of ufl.inner
     
     
-    b1_vec = ufl.as_vector([1.0 + 0.0j, -1.0j, 0.0j]) # WORKS AND IS CLEAN
-    b2_vec = ufl.as_vector([1.0 + 0.0j, 1.0j, 0.0j]) # WORKS AND IS CLEAN
+    # constructs convection vectors
+    b1_vec = ufl.as_vector([1.0 + 0.0j, -1.0j, 0.0j])
+    b2_vec = ufl.as_vector([1.0 + 0.0j, 1.0j, 0.0j]) 
     
     
     # INIT
@@ -457,75 +458,46 @@ def problem_solver(domain_mesh, time_iter_var : list,):
     phi2_new.x.array[:] = psi1_old.x.array
     
     
-    
     # CONSTRUCT BILINEAR AND LINEAR FORMS
+    # bilinear
     a_const = (j_im * 2 * dt_inv - pot_V + j_im * CAP_W) * PHI * v_conj * ufl.dx
     a_const += - 0.5 * ufl.inner( ufl.grad(PHI), ufl.grad(v) ) * ufl.dx
-    # a = - gamma_new * PHI * v_conj * ufl.dx + a_const
-    a_gamma = - gamma_new * PHI * v_conj * ufl.dx + a_const
+    a = - gamma_new * PHI * v_conj * ufl.dx + a_const # full bilinear
     
-    
+    # linear    
     L1 = j_im * 4 * dt_inv * psi1_old * v_conj * ufl.dx
-    L1 += - j_im * u * ufl.dot(b1_vec, ufl.grad(phi1_new + psi2_old)) * v_conj * ufl.dx
-    
-    
+    # L1 += - j_im * u * ufl.dot(b1_vec, ufl.grad(phi1_new + psi2_old)) * v_conj * ufl.dx
     L2 = j_im * 4 * dt_inv * psi2_old * v_conj * ufl.dx
-    L2 += - j_im * u * ufl.dot(b2_vec, ufl.grad(phi2_new + psi1_old)) * v_conj * ufl.dx
-    
-    
-    # assemble matrix and vector
-    A_const = fem.petsc.assemble_matrix(fem.form(a_const), bcs=[bc])
-    A_const.assemble()
-    
-    A_gamma = fem.petsc.assemble_matrix(fem.form(a_gamma), bcs=[bc])
-    A_gamma.assemble()
+    # L2 += - j_im * u * ufl.dot(b2_vec, ufl.grad(phi2_new + psi1_old)) * v_conj * ufl.dx
     
     
     
     # constructs the object and gathers
-    # A_mat = fem.petsc.assemble_matrix(fem.form(a), bcs=[bc])
-    # A_mat.assemble() # each process assemble the matrix
-    
-    
-    A_temp = A_const + A_gamma
-    A_block = PETSc.Mat().createNest(
-        [[A_temp, None],
-        [None, A_temp]],
-        comm=MPI.COMM.WORLD
-        )
-    A_block.assemble()
+    a_form = fem.form(a)
+    A_mat = fem.petsc.assemble_matrix(a_form, bcs=[bc])
+    A_mat.assemble() # each process assemble the matrix
     
     
     # assemble linear form; load vector
+    L1_form = fem.form(L1)
+    L2_form = fem.form(L2)
+    load_vec1 = fem.petsc.create_vector(V)
+    load_vec2 = fem.petsc.create_vector(V)
     
     
+    # Create PETSc solver
+    solver = PETSc.KSP().create(domain_mesh.comm)
+    solver.setOperators(A_mat)
     
-    # assemble solution vector
-    x_sol_vec = PETSc.Vec().createNest(
-        [create_vector_wrap(psi1_new.x),
-        create_vector_wrap(psi2_new.x)]
-        )
+    # PARALLEL Precond.
+    solver.setType("gmres")
+    pc = solver.getPC()    
+    pc.setType("bjacobi")
+    pc.setFactorSolverType("ilu")
     
-    
-    
-    
-    
-    # PETSc Options
-    petsc_options_prefix="psi_nested_solver_"
-    
-    # petsc_options={"ksp_type": "preonly", "pc_type": "lu"}, 
-    petsc_options = { # best for medium 
-    "ksp_type": "gmres",
-    "pc_type": "ilu"
-                }
-    # petsc_options = { # best for large parallel by chatgpt "FEniCSx complex conjugate..."
-    # "ksp_type": "gmres",
-    # "pc_type": "hypre",
-    # "pc_hypre_type": "boomeramg"
-    # },
-    
-    
-    
+    # SERIAL RUNS
+    # solver.setType(PETSc.KSP.Type.GMRES)
+    # solver.getPC().setType(PETSc.PC.Type.ILU)
     
     
     complete_sim_solutions = np.zeros(
@@ -543,41 +515,76 @@ def problem_solver(domain_mesh, time_iter_var : list,):
     
     for it in range(1, N_iter+1):
         
-        # solve problem
+        
+        # update load vector
+        with load_vec1.localForm() as lv1_loc:
+            lv1_loc.set(0)
+        
+        with load_vec2.localForm() as lv2_loc:
+            lv2_loc.set(0)
+        
+        # load_vec1.localForm().set(0)
+        # load_vec2.localForm().set(0)
+        fem.petsc.assemble_vector(load_vec1, L1_form)
+        fem.petsc.assemble_vector(load_vec2, L2_form)
+        
+        # apply lifting, prepare for to set Dirichlet BC
+        fem.petsc.apply_lifting(load_vec1, [a_form], bcs=[[bc]])
+        fem.petsc.apply_lifting(load_vec2, [a_form], bcs=[[bc]])
+        for b_sub in [load_vec1, load_vec2]:
+            # fem.petsc.apply_lifting(b_sub, a_form, bcs=[bc])
+            b_sub.ghostUpdate(
+                addv=PETSc.InsertMode.ADD,
+                mode=PETSc.ScatterMode.REVERSE
+                )
+            # fem.petsc.set_bc(b_sub, bcs=[bc])
+        
+        # set bcs on load vector
+        fem.petsc.set_bc(load_vec1, bcs=[bc])
+        fem.petsc.set_bc(load_vec2, bcs=[bc])
         
         
-        # update solutions
+        # solve problem & update ghost values
+        solver.solve(load_vec1, psi1_new.x.petsc_vec)
+        solver.solve(load_vec2, psi2_new.x.petsc_vec)
+        psi1_new.x.scatter_forward()
+        psi2_new.x.scatter_forward()
+        
+        
+        # update solutions & update ghost values
         psi1_old.x.array[:] = psi1_new.x.array - psi1_old.x.array
         psi2_old.x.array[:] = psi2_new.x.array - psi2_old.x.array
+        psi1_old.x.scatter_forward()
+        psi2_old.x.scatter_forward()
         
         
         gamma_new.x.array[:] = - gamma_new.x.array \
             + 2 * F_nonlin_func(psi1_old.x.array, psi2_old.x.array)
+        gamma_new.x.scatter_forward()
         
-        # update ghost values
-        # psi1_old.x.scatter_forward()
-        # psi2_old.x.scatter_forward()
-        # gamma_new.x.scatter_forward()
-        
-        
-        # force update the rhs
-        # prob.A.zeroEntries()
-        # fem.petsc.assemble_matrix(prob.A, prob.a, bcs=[bc, bc])
-        # prob.A.assemble()
-        
-        
+        # step besse relax on coupling term & update ghost values
         phi1_new.x.array[:] = 2 * psi2_old.x.array - phi1_new.x.array
         phi2_new.x.array[:] = 2 * psi1_old.x.array - phi2_new.x.array
+        phi1_new.x.scatter_forward()
+        phi2_new.x.scatter_forward()
         
-        # update ghost values
-        # phi1_new.x.scatter_forward()
-        # phi2_new.x.scatter_forward()
+        
+        # update LHS; Operator Matrix
+        A_mat.zeroEntries()
+        fem.petsc.assemble_matrix(A_mat, a_form, bcs=[bc])
+        A_mat.assemble()
         
         
         # store solution
         complete_sim_solutions[it] = psi1_old.x.array
         complete_sim_solutions[(N_iter+1)+it] = psi2_old.x.array
 
+    
+    # finilise and destroy; no memory leaks
+    A_mat.destroy()
+    load_vec1.destroy()
+    load_vec2.destroy()
+    solver.destroy()
     
     # L2 norm
     L2_norm_printer(psi1_old, psi2_old)
@@ -590,11 +597,10 @@ T = 1 # end time
 N = 300 # number of time steps from 0th
 dt = T / N # time step
 dt_inv = N / T
-sim_time_iter_var = [T, N // 2, dt, dt_inv] 
+sim_time_iter_var = [T, N, dt, dt_inv] 
 
 h = 0.09 # max mesh size
 ext_domain_mesh, _, _ = polygon_mesh(ext_domain_polygon_vertices, h)
-
 
 
 sim_solutions = problem_solver(ext_domain_mesh, sim_time_iter_var)
