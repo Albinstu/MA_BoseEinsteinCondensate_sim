@@ -9,10 +9,10 @@ Created on Thu Feb 26 10:39:22 2026
 import numpy as np
 from dolfinx import fem, mesh, plot, default_scalar_type, io
 from dolfinx.fem import petsc
-from mpi4py import MPI # for creating mesh
-from petsc4py import PETSc
 from dolfinx.io import gmsh as gmshio
 from dolfinx.la.petsc import create_vector_wrap
+from mpi4py import MPI # for creating mesh
+from petsc4py import PETSc
 import gmsh # mesh
 import ufl
 import pyvista # plotting
@@ -27,60 +27,29 @@ from time import perf_counter # preformance measure
 # =============================================================================
 
 ## DOMAIN PARAMETERS
-box_width_comp_domain = 13 # of computational domain
-box_height_comp_domain = 13 # -- || --
+box_width_comp_domain = None
+box_height_comp_domain = None
+a = None
+b = None
+delta = None
+potential_coords = None
+ext_domain_coord_ranges = None
+ext_domain_polygon_vertices = None
+h = None
 
-# rectangular domain is centered at origo
-a = box_width_comp_domain * 0.5 # half axis of box width
-b = box_height_comp_domain * 0.5 # half axis of box height
-delta = 2 # change to larger maybe 1 or 2
-
-# potential coordinates; row 0 - potential x-coord bounds
-#                        row 1 - potential y-coord bounds
-potential_coords = [(box_width_comp_domain * 0.25 - a, 
-                    box_width_comp_domain * 0.25 - a \
-                    # + 2.5/8 * box_width_comp_domain), 
-                    + 3), 
-                   (-b, b)]
-
-# computational_domain_coord_ranges = [(-a, a),
-#                                      (-b, b)]
-
-# coordinate ranges extended domain : upper row x-coords, lower row y-coords
-ext_domain_coord_ranges = [(-a-delta, a + delta),
-                                (-b - delta, b + delta)]
-
-# coordinates of polygon vertices for extended domain
-ext_domain_polygon_vertices = [(-a - delta, -b - delta),
-                                    (-a - delta, b + delta),
-                                    (a + delta, b + delta),
-                                    (a + delta, -b - delta)]
-
-
-## EQUATION COEFFICIENT PARAMETERS
-u = 2 # velocity of coupled term
-g = 0.25 # scattering amplitude 
+u = 0 # velocity of coupled term
+g = 0.0 # scattering amplitude 
 g1 = g # IF CHANGE VALUE HERE, MUST CHAGNE VALUE IN NON-LINEAR FUNC
 g2 = g
 g3 = g
-# b1 = np.array([1, -1j]) # convection vectors
-# b2 = np.array([1, 1j]) # ---- || ----
-
-
 # radius of start circ
-start_circ_r = np.abs(-a + potential_coords[0][0]) * 0.5
+start_circ_r = 0.0
 ang_of_atac = 0.0 # angle of attack against normal to potential barriers centre
-
 # initial coordinates of wave packet
 initial_coord = np.array([- start_circ_r * np.cos(ang_of_atac), 
                  start_circ_r * np.sin(ang_of_atac)])
-
-# momentum vector of initial cond
-# p_vec = - 20 * initial_coord[:] / np.linalg.norm(initial_coord)
-p_vec = - 4 * (initial_coord[:] / np.linalg.norm(initial_coord))
-# p_vec = [1, 0] # velocity of initial cond
-
-gauss_width = 1 # arbitrarily chosen # smaller diffuses faster
+p_vec = np.copy(initial_coord)
+gauss_width = 0.8 # arbitrarily chosen # smaller diffuses faster
 state_pop1 = 1 / np.sqrt(2) # state population
 state_pop2 = - state_pop1
 
@@ -305,17 +274,18 @@ def plotter_func(domain_mesh, sim_solutions,
     return None
 
 
-def initial_condition(x, state_pop, gauss_width=gauss_width,
-                      init_coord=initial_coord, mom_vec=p_vec):
-    px = mom_vec[0]
-    py = mom_vec[1]
+def initial_condition(x, state_pop):
+    px = p_vec[0]
+    py = p_vec[1]
+    x0 = initial_coord[0]
+    y0 = initial_coord[1]
     
     consts = state_pop / ( gauss_width * np.sqrt(np.pi))
-    gauss_pack = np.exp(- ( (x[0] - init_coord[0])**2 \
-       + (x[1] - init_coord[1])**2 ) / (2 * gauss_width ** 2) )
+    gauss_pack = np.exp(- ( (x[0] - x0)**2 \
+       + (x[1] - y0)**2 ) / (2 * gauss_width ** 2) )
     
-    wave_prop = np.exp( 1j * ( px * (x[0] - init_coord[0]) \
-                            + py * (x[1] - init_coord[1]) ))
+    wave_prop = np.exp( 1j * ( px * (x[0] - x0) \
+                            + py * (x[1] - y0) ))
     
     return consts * gauss_pack * wave_prop
 
@@ -357,9 +327,13 @@ def F_nonlin_func(psi1_arr, psi2_arr):
     # p2 = np.conj(psi2_arr) * g * ( psi1_arr + psi2_arr )
     # return p1 + p2
     
-    tmp = psi1_arr + psi2_arr
     
-    return g * np.conj(tmp) * tmp
+    # tmp = psi1_arr + psi2_arr
+    # return g * np.conj(tmp) * tmp
+    
+    f1 = np.conj(psi1_arr) * (g * psi1_arr + g3 * psi2_arr)
+    f2 = np.conj(psi2_arr) * (g3 * psi1_arr + g * psi2_arr)
+    return f1 + f2
 
 
 def L2_norm_printer(f1, f2):
@@ -376,200 +350,6 @@ def L2_norm_printer(f1, f2):
         print(PSI_norm_glob)
     
     return None
-
-
-def problem_solver(domain_mesh, time_iter_var : list,):
-    
-    assert np.dtype(PETSc.ScalarType).kind == "c"
-
-    # CHECK IF ALGEBRA PETSc CAN HANDLE COMPLEX
-    if np.issubdtype(PETSc.ScalarType, np.complexfloating):
-        j_im = PETSc.ScalarType(0 + 1j)
-    else:
-        print('Complex Treatment is needed')
-    
-    
-    # UNPACK variables for time stepper
-    # T = time_iter_var[0]
-    N_iter = time_iter_var[1]
-    # dt = time_iter_var[2]
-    dt_inv = time_iter_var[3]
-    
-    
-    # DISCRETE SPACES
-    # function space
-    V = fem.functionspace(domain_mesh, ("Lagrange", 1))
-    # coeff func space; one-to-one connection cell and value
-    Q = fem.functionspace(domain_mesh, ("DG", 0)) 
-    
-    
-    # DEFINE COEFF
-    CAP_W = fem.Function(Q)
-    CAP_W.name = "CAP = W"
-    CAP_W.interpolate(CAP_func)
-    
-    pot_V = fem.Function(Q)
-    pot_V.name = "V"
-    pot_V.interpolate(potential_func)
-    
-    
-    # APPLY BC
-    tdim = domain_mesh.topology.dim # give dim of cells
-    fdim = tdim - 1 # dim of facets/edges
-    domain_mesh.topology.create_connectivity(fdim, tdim) # edge to cell
-    boundary_facets = mesh.exterior_facet_indices(domain_mesh.topology) 
-    boundary_dofs = fem.locate_dofs_topological(V, fdim, boundary_facets)
-    bc = fem.dirichletbc(default_scalar_type(0), boundary_dofs, V)
-    
-    
-    # CONSTRUCT FUNCTIONS
-    psi1_old = fem.Function(V)
-    psi2_old = fem.Function(V)
-    
-    psi1_new = fem.Function(V)
-    psi2_new = fem.Function(V)
-    
-    # steppers part of relaxation scheme
-    gamma_new = fem.Function(V)
-    
-    
-    # trial & test function
-    PHI = ufl.TrialFunction(V)
-    v = ufl.TestFunction(V)
-    v_conj = ufl.conj(v) # conjugate needed instead of ufl.inner
-    
-    
-    # constructs convection vectors
-    b1_vec = ufl.as_vector([1.0 + 0.0j, -1.0j, 0.0j])
-    b2_vec = ufl.as_vector([1.0 + 0.0j, 1.0j, 0.0j]) 
-    
-    
-    # INIT
-    psi1_old.interpolate(lambda x : initial_condition(x, state_pop1))
-    psi2_old.interpolate(lambda x : initial_condition(x, state_pop2))
-    gamma_new.x.array[:] = F_nonlin_func(psi1_old.x.array, psi2_old.x.array)
-    
-    
-    # CONSTRUCT BILINEAR AND LINEAR FORMS
-    # bilinear
-    a_const = (j_im * 2 * dt_inv - pot_V + j_im * CAP_W) * PHI * v_conj * ufl.dx
-    a_const += - 0.5 * ufl.inner( ufl.grad(PHI), ufl.grad(v) ) * ufl.dx
-    a = - gamma_new * PHI * v_conj * ufl.dx + a_const # full bilinear
-    
-    # linear    
-    L1 = j_im * 4 * dt_inv * psi1_old * v_conj * ufl.dx
-    L1 += - j_im * u * ufl.dot(b1_vec, ufl.grad(psi2_old)) * v_conj * ufl.dx
-    L2 = j_im * 4 * dt_inv * psi2_old * v_conj * ufl.dx
-    L2 += - j_im * u * ufl.dot(b2_vec, ufl.grad(psi1_old)) * v_conj * ufl.dx
-    
-    
-    
-    # constructs the object and gathers
-    a_form = fem.form(a)
-    A_mat = fem.petsc.assemble_matrix(a_form, bcs=[bc])
-    A_mat.assemble() # each process assemble the matrix
-    
-    
-    # assemble linear form; load vector
-    L1_form = fem.form(L1)
-    L2_form = fem.form(L2)
-    load_vec1 = fem.petsc.create_vector(V)
-    load_vec2 = fem.petsc.create_vector(V)
-    
-    
-    # Create PETSc solver
-    solver = PETSc.KSP().create(domain_mesh.comm)
-    solver.setOperators(A_mat)
-    
-    # SERIAL RUNS
-    solver.setType(PETSc.KSP.Type.GMRES)
-    solver.getPC().setType(PETSc.PC.Type.ILU)
-    
-    
-    complete_sim_solutions = np.zeros(
-        ( 2 * (N_iter+1), psi1_old.x.array.shape[0] ),
-        dtype=np.complex128()
-        )
-    
-    complete_sim_solutions[0] = psi1_old.x.array
-    complete_sim_solutions[N_iter+1] = psi2_old.x.array
-
-    
-    # L2 norm
-    L2_norm_printer(psi1_old, psi2_old)
-    
-    
-    for it in range(1, N_iter+1):
-        
-        
-        # update load vector
-        with load_vec1.localForm() as lv1_loc:
-            lv1_loc.set(0)
-        
-        with load_vec2.localForm() as lv2_loc:
-            lv2_loc.set(0)
-        
-        # load_vec1.localForm().set(0)
-        # load_vec2.localForm().set(0)
-        fem.petsc.assemble_vector(load_vec1, L1_form)
-        fem.petsc.assemble_vector(load_vec2, L2_form)
-        
-        # apply lifting, prepare for to set Dirichlet BC
-        fem.petsc.apply_lifting(load_vec1, [a_form], bcs=[[bc]])
-        fem.petsc.apply_lifting(load_vec2, [a_form], bcs=[[bc]])
-        for b_sub in [load_vec1, load_vec2]:
-            # fem.petsc.apply_lifting(b_sub, a_form, bcs=[bc])
-            b_sub.ghostUpdate(
-                addv=PETSc.InsertMode.ADD,
-                mode=PETSc.ScatterMode.REVERSE
-                )
-            # fem.petsc.set_bc(b_sub, bcs=[bc])
-        
-        # set bcs on load vector
-        fem.petsc.set_bc(load_vec1, bcs=[bc])
-        fem.petsc.set_bc(load_vec2, bcs=[bc])
-        
-        
-        # solve problem & update ghost values
-        solver.solve(load_vec1, psi1_new.x.petsc_vec)
-        solver.solve(load_vec2, psi2_new.x.petsc_vec)
-        psi1_new.x.scatter_forward()
-        psi2_new.x.scatter_forward()
-        
-        
-        # update solutions & update ghost values
-        psi1_old.x.array[:] = psi1_new.x.array - psi1_old.x.array
-        psi2_old.x.array[:] = psi2_new.x.array - psi2_old.x.array
-        psi1_old.x.scatter_forward()
-        psi2_old.x.scatter_forward()
-        
-        
-        gamma_new.x.array[:] = - gamma_new.x.array \
-            + 2 * F_nonlin_func(psi1_old.x.array, psi2_old.x.array)
-        gamma_new.x.scatter_forward()
-        
-        
-        # update LHS; Operator Matrix
-        A_mat.zeroEntries()
-        fem.petsc.assemble_matrix(A_mat, a_form, bcs=[bc])
-        A_mat.assemble()
-        
-        
-        # store solution
-        complete_sim_solutions[it] = psi1_old.x.array
-        complete_sim_solutions[(N_iter+1)+it] = psi2_old.x.array
-
-    
-    # finilise and destroy; no memory leaks
-    A_mat.destroy()
-    load_vec1.destroy()
-    load_vec2.destroy()
-    solver.destroy()
-    
-    # L2 norm
-    L2_norm_printer(psi1_old, psi2_old)
-    
-    return complete_sim_solutions
 
 
 def aux_func_constructor(domain_mesh):
@@ -599,15 +379,10 @@ def BC_constructor(domain_mesh, V):
 
 
 
-def new_solver(domain_mesh, time_iter_var : list,):
+def problem_solver(domain_mesh, time_iter_var : list,):
     
     assert np.dtype(PETSc.ScalarType).kind == "c"
-
-    # CHECK IF ALGEBRA PETSc CAN HANDLE COMPLEX
-    if np.issubdtype(PETSc.ScalarType, np.complexfloating):
-        j_im = PETSc.ScalarType(0 + 1j)
-    else:
-        print('Complex Treatment is needed')
+    j_im = PETSc.ScalarType(0 + 1j)
     
     
     # UNPACK variables for time stepper
@@ -620,8 +395,6 @@ def new_solver(domain_mesh, time_iter_var : list,):
     # DISCRETE SPACES
     # function space
     V = fem.functionspace(domain_mesh, ("Lagrange", 1))
-    # P1 = ufl.element("Lagrange", domain_mesh.ufl_cell(), 1)
-    # V_ME = fem.functionspace(domain_mesh, ufl.MixedElement([V.ufl_element(), V.ufl_element()])) # mixed func space
     
     # construct functions
     CAP_W, pot_V = aux_func_constructor(domain_mesh)
@@ -878,26 +651,75 @@ def new_solver(domain_mesh, time_iter_var : list,):
     return complete_sim_solutions
 
 
+# Unpack box domain param
+data = np.load("sim_data_files/box_params.npz")
+box_width_comp_domain = data["bwcd"]
+box_height_comp_domain = data["bhcp"]
+a = data["a_axis"]
+b = data["b_axis"]
+delta = data["d"]
+potential_coords = data["pot_coords"]
+ext_domain_coord_ranges = data["domain_coord_ranges"]
+ext_domain_polygon_vertices = data["domain_polygon_vertices"]
+h = data["h_max"] # max mesh size
+del data
+
+
+## EQUATION COEFFICIENT PARAMETERS
+u = 2 # velocity of coupled term
+g = 0.25 # scattering amplitude 
+g1 = g # IF CHANGE VALUE HERE, MUST CHAGNE VALUE IN NON-LINEAR FUNC
+g2 = g
+g3 = 0.1
+
+
+
+y0 = 0
+initial_coord = np.array([(-a + potential_coords[0][0]) * 0.5, 0])
+
+# radius of start circ
+# start_circ_r = np.abs(-a + potential_coords[0][0]) * 0.5
+# ang_of_atac = 0.0 # angle of attack against normal to potential barriers centre
+
+# initial coordinates of wave packet
+# initial_coord = np.array([- start_circ_r * np.cos(ang_of_atac), 
+#                  start_circ_r * np.sin(ang_of_atac)])
+
+# momentum vector of initial cond
+# p_vec = - 20 * initial_coord[:] / np.linalg.norm(initial_coord)
+p_vec = - 4 * (initial_coord[:] / np.linalg.norm(initial_coord))
+# p_vec = [1, 0] # velocity of initial cond
+
+gauss_width = 1 # arbitrarily chosen # smaller diffuses faster
+state_pop1 = 1 / np.sqrt(2) # state population
+state_pop2 = - state_pop1
+
+
+
+## SIM TIME PARAM
 T = 1 # end time
-N = 300 # number of time steps from 0th
+N = 200 # number of time steps from 0th
 dt = T / N # time step
 dt_inv = N / T
 sim_time_iter_var = [T, N, dt, dt_inv]
 
-h = 0.09 # max mesh size
-# ext_domain_mesh, _, _ = polygon_mesh(ext_domain_polygon_vertices, h)
-with io.XDMFFile(MPI.COMM_WORLD, "mesh.xdmf", "r") as xdmf:
-    # ext_domain_mesh = xdmf.read_mesh(name="Grid")
-    ext_domain_mesh = xdmf.read_mesh()
-xdmf.close()
+
+## LOAD MESH
+h = 0.08
+ext_domain_mesh, _, _ = polygon_mesh(ext_domain_polygon_vertices, h)
+# with io.XDMFFile(MPI.COMM_WORLD, "sim_data_files/mesh.xdmf", "r") as xdmf:
+#     # ext_domain_mesh = xdmf.read_mesh(name="Grid")
+#     ext_domain_mesh = xdmf.read_mesh()
+# xdmf.close()
 
 
-# sim_solutions = problem_solver(ext_domain_mesh, sim_time_iter_var)
-sim_solutions = new_solver(ext_domain_mesh, sim_time_iter_var)
+
+sim_solutions = problem_solver(ext_domain_mesh, sim_time_iter_var)
+np.save("sim_data_files/comp_sol_1", sim_solutions)
 
 
-# plotter_func(ext_domain_mesh, sim_solutions, sim_time_iter_var, 
-#              scale_factor=10, args=True)
+plotter_func(ext_domain_mesh, sim_solutions, sim_time_iter_var, 
+             scale_factor=10, args=True)
 
 
 
